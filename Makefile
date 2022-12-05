@@ -16,7 +16,7 @@ IFLAGS = -I/comp/40/build/include -I/usr/sup/cii40/include/cii
 # to use the GNU 99 standard to get the right items in time.h for the
 # the timing support to compile.
 # 
-CFLAGS = -g -O1 -std=gnu99 -Wall -Wextra -Werror -Wfatal-errors -pedantic $(IFLAGS)
+CFLAGS = -g -O2 -std=gnu99 -Wall -Wextra -Werror -Wfatal-errors -pedantic $(IFLAGS)
 
 # Linking flags
 # Set debugging information and update linking path
@@ -27,7 +27,7 @@ LDFLAGS = -g -L/comp/40/build/lib -L/usr/sup/cii40/lib64
 # All programs cii40 (Hanson binaries) and *may* need -lm (math)
 # 40locality is a catch-all for this assignment, netpbm is needed for pnm
 # rt is for the "real time" timing library, which contains the clock support
-LDLIBS = -larith40 -l40locality -lnetpbm -lcii40 -O1 -lm -lrt
+LDLIBS = -larith40 -l40locality -lnetpbm -lcii40 -O2 -lm -lrt
 
 # Collect all .h files in your directory.
 # This way, you can never forget to add

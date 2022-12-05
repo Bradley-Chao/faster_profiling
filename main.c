@@ -11,6 +11,22 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <sys/stat.h>
+
+#define CONDITIONAL_MOVE 0
+#define SEGMENTED_LOAD 1
+#define SEGMENTED_STORE 2
+#define ADDITION 3
+#define MULTIPLICATION 4
+#define DIVISION 5
+#define BITWISE_NAND 6
+#define HALT 7
+#define MAP_SEGMENT 8
+#define UNMAP_SEGMENT 9
+#define OUTPUT 10
+#define INPUT 11
+#define LOAD_PROGRAM 12
+#define LOAD_VALUE 13
 
 /*************************************************************************
                         Start Universal Machine Module 
@@ -28,8 +44,8 @@ typedef struct universal_machine {
         
         /* contiguous block of 64-bit addresses of queues which represent segments of 32-bit word instructions */
         uint32_t **segments;
-        uint32_t num_segments;
         uint32_t segment_arr_size;
+        uint32_t total_seg_space;
 
 } *universal_machine;
 
@@ -48,8 +64,9 @@ universal_machine new_UM(uint32_t *program_instructions)
         UM->ID_arr_size = 1;
 
         UM->segments = malloc(1 * sizeof(uint32_t *));
-        UM->num_segments = 1;
         UM->segment_arr_size = 1;
+
+        UM->total_seg_space = 1;
 
         /* Store pointer to first word instruction in segment zero */
         UM->segments[0] = program_instructions;
@@ -64,7 +81,7 @@ void free_UM(universal_machine *UM)
         uint32_t **spine = (*UM)->segments;
 
                 
-        for (size_t i = 0; i < (*UM)->num_segments; i++)
+        for (size_t i = 0; i < (*UM)->total_seg_space; i++)
                 free(spine[i]);
 
         free(spine);        
@@ -88,18 +105,18 @@ inline uint32_t map_segment(universal_machine UM, uint32_t num_words)
         /* Case 1: If there are no unmapped IDs */
         if (UM->num_IDs == 0) {
                 /* Check whether realloc is necessary for segments spine */
-                if (UM->num_segments == UM->segment_arr_size) {
+                if (UM->total_seg_space == UM->segment_arr_size) {
                         uint32_t bigger_arr_size = UM->segment_arr_size * 2;
                         UM->segments = realloc(UM->segments, bigger_arr_size * sizeof(uint32_t *));
                         assert(UM->segments);
                         UM->segment_arr_size = bigger_arr_size;
                 }
 
-                UM->segments[UM->num_segments] = new_segment;
+                UM->segments[UM->total_seg_space] = new_segment;
 
-                UM->num_segments++;
+                UM->total_seg_space++;
 
-                return UM->num_segments - 1;
+                return UM->total_seg_space - 1;
         }
         /* Case 2: There are unmapped IDs available for use */
         else {
@@ -112,8 +129,6 @@ inline uint32_t map_segment(universal_machine UM, uint32_t num_words)
                 free(to_unmap);
 
                 UM->segments[available_ID] = new_segment;
-
-                UM->num_segments++;
 
                 return available_ID;
         }
@@ -135,7 +150,6 @@ inline void unmap_segment(universal_machine UM, uint32_t segment_ID)
 
         /* Update number of IDs and number of segments */
         UM->num_IDs++;
-        UM->num_segments--;
 }
 
 /*************************************************************************
@@ -336,59 +350,30 @@ inline void load_value(universal_machine UM, UM_Reg A, uint32_t value)
                         Start Program Main Module 
 *************************************************************************/
 
-Except_T Bitpack_Overflow = { "Overflow packing bits" };
-
-static inline uint64_t shl(uint64_t word, unsigned bits)
+static inline uint32_t get_reg_C(uint64_t word)
 {
-        assert(bits <= 64);
-        if (bits == 64)
-                return 0;
-        else
-                return word << bits;
+        return word & 7;
 }
 
-static inline uint64_t shr(uint64_t word, unsigned bits)
-{
-        assert(bits <= 64);
-        if (bits == 64)
-                return 0;
-        else
-                return word >> bits;
-}
+// static inline uint32_t get_reg_B(uint64_t word)
+// {
+//         return word & 72;
+// }
 
-static inline bool Bitpack_fitsu(uint64_t n, unsigned width)
+// static inline uint32_t get_reg_A(uint64_t word)
+// {
+//         return word & 448;
+// }
+
+static inline uint64_t Bitpack_getu(uint64_t word, unsigned width, unsigned lsb)
 {
-        assert(width <= 64);
-        /* thanks to Jai Karve and John Bryan  */
-        /* clever shortcut instead of 2 shifts */
-        return shr(n, width) == 0; 
+        return (word << (64 - (lsb + width))) >> (64 - width); 
 }
 
 static inline uint64_t Bitpack_newu(uint64_t word, unsigned width, unsigned lsb,
                       uint64_t value)
 {
-        assert(width <= 64);
-        unsigned hi = lsb + width; /* one beyond the most significant bit */
-        assert(hi <= 64);
-        if (!Bitpack_fitsu(value, width)) {
-                printf("Value : %lu\n", value);
-                printf("width : %u\n", width);
-
-                RAISE(Bitpack_Overflow);
-        }
-        return shl(shr(word, hi), hi)                 /* high part */
-                | shr(shl(word, 64 - lsb), 64 - lsb)  /* low part  */
-                | (value << lsb);                     /* new part  */
-}
-
-static inline uint64_t Bitpack_getu(uint64_t word, unsigned width, unsigned lsb)
-{
-        assert(width <= 64);
-        unsigned hi = lsb + width; /* one beyond the most significant bit */
-        assert(hi <= 64);
-        /* different type of right shift */
-        return shr(shl(word, 64 - hi),
-                   64 - width); 
+        return (word ^= Bitpack_getu(word, width, lsb) << lsb) | (value << lsb);
 }
 
 universal_machine read_program_file(FILE *fp)
@@ -442,176 +427,107 @@ void run_program(universal_machine UM)
 {
         assert(UM != NULL);
 
-        fprintf(stderr, "POOPY BUTT\n");
-
         while (true) {
                 uint32_t *segment_zero = UM->segments[0];
 
                 UM_instruction word = segment_zero[UM->program_counter + 1];
 
-                int OP_CODE = Bitpack_getu(word, 4, 28);
-               
-                UM_Reg A, B, C;
+                int OP_CODE = word >> 28;
 
-                // printf("PROGRAM COUNTER: %d\n", UM->program_counter);
-
-                // switch (OP_CODE) {
-                //         case 0:
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 conditional_move(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 1:
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 segmented_load(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 2:
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 segmented_store(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 3:
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 addition(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 4:
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 multiplication(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 5:
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 division(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 6: 
-                //                 A = Bitpack_getu(word, 3, 6);
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 bitwise_nand(UM, A, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 7:
-                //                 return;
-                //         case 8:
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 map(UM, B, C);
-                //                 UM->program_counter++;
-                //                 break;
-
-                //         case 9:
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 unmap(UM, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 10:
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 output(UM, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 11:
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 input(UM, C);
-                //                 UM->program_counter++;
-                //                 break;
-                //         case 12:
-                //                 B = Bitpack_getu(word, 3, 3);
-                //                 C = Bitpack_getu(word, 3, 0);
-                //                 load_program(UM, B);
-                //                 UM->program_counter = UM->registers[C];
-                //                 break;
-                                
-                // }
-
-
-
-
-                /* Halt Command, exit function to free data */
-                if (OP_CODE == 7) {
-                        return;
-                }
-                /* Special Load Value Command */
-                else if (OP_CODE == 13) {
-                        A = Bitpack_getu(word, 3, 25);
-                        int load_val = Bitpack_getu(word, 25, 0);
-                        
-                        load_value(UM, A, load_val);
-                }
-                /* Other 12 instructions */
-                else {
-                        A = Bitpack_getu(word, 3, 6);
-                        B = Bitpack_getu(word, 3, 3);
-                        C = Bitpack_getu(word, 3, 0);
-
-                        switch (OP_CODE) {
-                                case 0:
-                                        conditional_move(UM, A, B, C);
-                                        break;
-                                case 1:
-                                        segmented_load(UM, A, B, C);
-                                        break;
-                                case 2:
-                                        segmented_store(UM, A, B, C);
-                                        break;
-                                case 3:
-                                        addition(UM, A, B, C);
-                                        break;
-                                case 4:
-                                        multiplication(UM, A, B, C);
-                                        break;
-                                case 5:
-                                        division(UM,  A, B, C);
-                                        break;
-                                case 6:
-                                        bitwise_nand(UM, A, B, C);
-                                        break;
-                                case 8:
-                                        map(UM, B, C);
-                                        break;
-                                case 9:
-                                        unmap(UM, C);
-                                        break;
-                                case 10:
-                                        output(UM, C);
-                                        break;
-                                case 11:
-                                        input(UM, C);
-                                        break;
-                                case 12:
-                                        load_program(UM, B);
-                                        break;
-                        }
-                }
-        
-                if (OP_CODE == 12)
-                        UM->program_counter = UM->registers[C];
-                else
+                /* Shift before anding ? */
+                if (OP_CODE == LOAD_VALUE) {
+                        load_value(UM, (word >> 25) & 7, (word << 7) >> 7);
                         UM->program_counter++;
+                }
+                else if (OP_CODE == SEGMENTED_LOAD) {
+                        segmented_load(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == SEGMENTED_STORE) {
+                        segmented_store(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == BITWISE_NAND) {
+                        bitwise_nand(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == ADDITION) {
+                        addition(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == LOAD_PROGRAM) {
+                        load_program(UM, (word >> 3) & 7);
+                        UM->program_counter = UM->registers[word & 7];
+                }
+                else if (OP_CODE == CONDITIONAL_MOVE) {
+                        conditional_move(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == MAP_SEGMENT) {
+                        map(UM, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == UNMAP_SEGMENT) {
+                        unmap(UM, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == DIVISION) {
+                        division(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == MULTIPLICATION) {
+                        multiplication(UM, (word >> 6) & 7, (word >> 3) & 7, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == OUTPUT) {
+                        output(UM, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == INPUT) {
+                        input(UM, word & 7);
+                        UM->program_counter++;
+                }
+                else if (OP_CODE == HALT)
+                        return;
         }
 }
 
 int main(int argc, char *argv[])
 {
-        assert(argc == 2);
+        if (argc != 2) exit(EXIT_FAILURE);
 
         FILE *fp = fopen(argv[1], "rb");
-        
-        universal_machine UM = read_program_file(fp);
+        assert(fp);
+
+        struct stat file_info;
+        stat(argv[1], &file_info);
+
+        int arraysize = (int) (file_info.st_size / 4);
+
+        uint32_t *segment_zero = malloc((arraysize + 1) * sizeof(uint32_t));
+
+        uint32_t word = 0;
+
+        int num_elems = 0;
+
+        int byte = fgetc(fp);
+
+        while (byte != EOF) {
+                word = 0;
+
+                for (int i = 3; i >= 0; i--) {
+                        word = Bitpack_newu(word, 8, i * 8, byte);
+                        byte = fgetc(fp);
+                }
+
+                segment_zero[num_elems + 1] = word;
+
+                num_elems++;
+        }
+
+        segment_zero[0] = num_elems;
+
+        universal_machine UM = new_UM(segment_zero);
 
         run_program(UM);
 
